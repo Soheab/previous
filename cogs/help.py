@@ -1,14 +1,15 @@
-from typing import Dict, NamedTuple, Optional
-from .utils.split_txtfile import split_txtfile
+from typing import Any, Callable, Coroutine, Dict, Literal, NamedTuple, Optional, Union
+from re import L, search
+from nextcord.errors import Forbidden, HTTPException
 
 from nextcord.ext import commands
+from nextcord.utils import escape_markdown as escma
 from nextcord import (
     Button,
     ButtonStyle,
     ChannelType,
     Colour,
     Embed,
-    Guild,
     Interaction,
     Member,
     MessageType,
@@ -17,10 +18,14 @@ from nextcord import (
     ui
 )
 
-HELP_CHANNEL_ID: int = 881965127031722004
-HELP_LOGS_CHANNEL_ID: int = 883035085434142781
-HELPER_ROLE_ID: int = 882192899519954944
+HELP_CHANNEL_ID: int = 890674348313157703 #881965127031722004
+HELP_LOGS_CHANNEL_ID: int = 890674366776475769 #883035085434142781
+HELPER_ROLE_ID: int = 916051595794448396 #882192899519954944
+STAFF_ROLE_ID: int = 916051618187870280 #881119384528105523
 CUSTOM_ID_PREFIX: str = "help:"
+
+from .utils.split_txtfile import split_txtfile
+from .utils.utility import can_close, is_thread
 
 closing_message = ("If your question has not been answered or your issue not "
                    "resolved, we suggest taking a look at [Python's Guide to "
@@ -34,31 +39,109 @@ async def get_thread_author(channel: Thread) -> Member:
     user = history_flat[0].mentions[0]
     return user
 
+async def send_thread_log(state: Literal["OPENED", "CLOSED"], method: str, thread: Thread, thread_author: Member, closed_by: Member = None) -> None:
+    type_to_colour: Dict[str, Colour] = {"Nextcord": Colour.red(), "Python": Colour.green()}
+    print(thread.name)
+    thread_type = (search("(Python|Nextcord)", thread.name)).group()  # type: ignore
+    thread_topic = search(".+?(?=Python|Nextcord)", thread.name)
+    thread_topic = f"**Topic:** {thread_topic.group()}\n\n" if thread_topic else ""
+        
+    log_embed = Embed(
+        title=f"{thread_type} Help thread {state.lower()}",
+        colour = type_to_colour[thread_type],
+        description=f"{thread_topic}**Thread:** {escma(str(thread.name.strip(thread_topic)))} ({thread.id})\n"
+                    f"**Author:** {escma(str(thread_author))} ({thread_author.id})"
+    )
+    if closed_by:
+        log_embed.description += f"\n\n**Closed by:** {escma(str(closed_by))} ({closed_by.id}) from the {method.lower()}\n"  # type: ignore
 
-async def close_help_thread(method: str, thread_channel, thread_author):
+    await thread.guild.get_channel(HELP_LOGS_CHANNEL_ID).send(embed=log_embed, view=LogView(state, thread))  # type: ignore
+
+    
+async def close_help_thread(method: str, thread_channel, thread_author, closed_by: Member):
     """Closes a help thread. Is called from either the close button or the
     =close command.
     """
-    _last_msg = await thread_channel.fetch_message(thread_channel.last_message.id)
+    if not thread_channel.last_message or not thread_channel.last_message_id:
+        _last_msg = (await (thread_channel.history(limit = 1)).flatten())[0]
+    else:
+        _last_msg = thread_channel.get_partial_message(thread_channel.last_message_id)
     thread_jump_url = _last_msg.jump_url
 
-    dm_embed_thumbnail = thread_channel.guild.icon.url
+    dm_embed_thumbnail = str(thread_channel.guild.icon) if thread_channel.guild.icon else Embed.Empty
     embed_reply = Embed(title="This thread has now been closed",
                         description=closing_message,
                         colour=Colour.dark_theme())
 
     await thread_channel.send(embed=embed_reply)  # Send the closing message to the help thread
     await thread_channel.edit(locked = True, archived = True)  # Lock thread
-    await thread_channel.guild.get_channel(HELP_LOGS_CHANNEL_ID).send(  # Send log
-        content = f"Help thread {thread_channel.name} (created by {thread_author.name}) has been closed."
-    )
+    await send_thread_log("CLOSED", method, thread_channel, thread_author, closed_by) # Send log
+
     # Make some slight changes to the previous thread-closer embed
     # to send to the user via DM.
     embed_reply.title = "Your help thread in the Nextcord server has been closed."
     embed_reply.description += (f"\n\nYou can use [**this link**]({thread_jump_url}) to "
                                 "access the archived thread for future reference")
     embed_reply.set_thumbnail(url=dm_embed_thumbnail)
-    await thread_author.send(embed=embed_reply)
+    try:
+        await thread_author.send(embed=embed_reply)
+    except (Forbidden, HTTPException):
+        pass
+class LogView(ui.View):
+    def __init__(self, state: Literal["OPENED", "CLOSED"], thread: Thread, /):
+        super().__init__(timeout=None)
+        self.__state = state
+        self.thread = thread
+        self.visit_thread_button = ui.Button(label="Visit Thread", url=f"discord://-/channels/{thread.guild.id}/{thread.id}")
+        self.view_thread_button = ui.Button(label="View Thread", custom_id=f"{CUSTOM_ID_PREFIX}view_thread")
+        self.close_thread_button = ui.Button(label="Close", style=ButtonStyle.danger, custom_id=f"{CUSTOM_ID_PREFIX}close_thread")
+        self.reopen_thread_button = ui.Button(label="Re-Open", style=ButtonStyle.green, custom_id=f"{CUSTOM_ID_PREFIX}reopen_thread")
+
+        self.add_buttons()
+    
+    def __gen_callback(self, _button: ui.Button) -> ui.Button:
+        async def callback(interaction) -> None:
+            if _button.custom_id == f"{CUSTOM_ID_PREFIX}close_thread":
+                if interaction.user.get_role(STAFF_ROLE_ID) or interaction.user.get_role(HELPER_ROLE_ID):
+                    thread_author = await get_thread_author(self.thread)
+                    _button.disabled = True
+                    await interaction.message.edit(view=self)
+                    await close_help_thread("BUTTON", self.thread, thread_author, interaction.user)
+                else:
+                    await interaction.response.send_message("You do not have permission to close this thread.", ephermal=True)
+                    
+            elif _button.custom_id == f"{CUSTOM_ID_PREFIX}reopen_thread":
+                if interaction.user.get_role(STAFF_ROLE_ID):
+                    _button.disabled = True
+                    await interaction.message.edit(view=self)
+                    if not self.thread.last_message or not self.thread.last_message_id:
+                        _last_msg = (await (self.thread.history(limit = 1)).flatten())[0]
+                    else:
+                        _last_msg = self.thread.get_partial_message(self.thread.last_message_id)
+
+                    await self.thread.edit(locked = False, archived = False)
+                    await _last_msg.delete()
+                else:
+                    await interaction.response.send_message("You do not have permission to re-open this thread.", ephemeral=True)
+
+            elif _button.custom_id == f"{CUSTOM_ID_PREFIX}view_thread":
+                if self.thread.permissions_for(interaction.user).read_messages:
+                    await interaction.response.send_message("You can already access that thread.", ephemeral=True)
+                else:
+                    await self.thread.add_user(interaction.user)
+                    await interaction.response.send_message("You have been added to the thread.", ephemeral=True)
+                    
+        _button.callback = callback  # type: ignore
+        return _button
+            
+
+    def add_buttons(self):
+        self.add_item(self.visit_thread_button)
+        self.add_item(self.__gen_callback(self.view_thread_button))
+        if self.__state == "OPENED":
+            self.add_item(self.__gen_callback(self.close_thread_button))
+        else:
+            self.add_item(self.__gen_callback(self.reopen_thread_button))
     
 
 class HelpButton(ui.Button["HelpView"]):
@@ -73,9 +156,7 @@ class HelpButton(ui.Button["HelpView"]):
             type = channel_type
         )
 
-        await interaction.guild.get_channel(HELP_LOGS_CHANNEL_ID).send(
-            content = f"Help thread for {self._help_type} created by {interaction.user.mention}: {thread.mention}!"
-        )
+        await send_thread_log("OPENED", "BUTTON", thread, interaction.user) # type: ignore # Send log
         close_button_view = ThreadCloseView()
         close_button_view._thread_author = interaction.user
 
@@ -175,7 +256,7 @@ class ThreadCloseView(ui.View):
 
         if not self._thread_author:
             await self._get_thread_author(interaction.channel)  # type: ignore
-        await close_help_thread("button", interaction.channel, self._thread_author)
+        await close_help_thread("BUTTON", interaction.channel, self._thread_author, interaction.user) # type: ignore
         button.disabled = True
 
     async def interaction_check(self, interaction: Interaction) -> bool:
@@ -219,14 +300,7 @@ class HelpCog(commands.Cog):
         if member.id != thread_author.id:
             return
 
-        FakeContext = NamedTuple("FakeContext", [("channel", Thread), ("author", Member), ("guild", Guild)])
-
-        # _self represents the cog. Thanks Epic#6666
-        async def fake_send(_self, *args, **kwargs):
-            return await thread.send(*args, **kwargs)
-
-        FakeContext.send = fake_send
-        await self.close(FakeContext(thread, thread_author, thread.guild))
+        await close_help_thread("EVENT", thread, thread_author, self.bot.user)  # type: ignore
 
     @commands.command()
     @commands.is_owner()
@@ -238,12 +312,31 @@ class HelpCog(commands.Cog):
                        view = HelpView())
 
     @commands.command()
+    @is_thread()
+    @can_close()
     async def close(self, ctx):
-        if not isinstance(ctx.channel, Thread) or ctx.channel.parent_id != HELP_CHANNEL_ID:
-            return
         thread_author = await get_thread_author(ctx.channel)
-        await close_help_thread("button", ctx.channel, thread_author)
+        await close_help_thread("COMMAND", ctx.channel, thread_author, ctx.author)  # type: ignore
 
+    @commands.command()
+    @is_thread()
+    @can_close()
+    async def helptopic(self, ctx, *, topic: str):
+        """ Set the topic of this help thread. This is only available to staff and helpers.
+
+            Please use keywords. Example: `=helptopic migrating`
+        """
+       # thread_type = (match("^(Python|Nextcord)", ctx.channel.name)).group()  # type: ignore
+        await ctx.channel.edit(name=f"{topic} {ctx.channel.name}")
+        await ctx.send(f"Topic set to: `{topic}` by {ctx.author.mention}.")
+
+    @close.error
+    @helptopic.error  # type: ignore
+    async def help_thread_command_error(self, _: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.CheckFailure):
+            return
+        else:
+            raise error
 
 def setup(bot):
     bot.add_cog(HelpCog(bot))

@@ -17,6 +17,9 @@ discord_regex = compile(r"#!(\d+)")
 
 @bot.event
 async def on_command_error(ctx, error):
+    if ctx.command.has_error_handler:
+        return
+        
     if isinstance(error, errors.CommandNotFound):
         await ctx.channel.send("This command does not exist.")
         return
@@ -52,6 +55,8 @@ async def todo(ctx):
 
 for filename in os.listdir("./cogs"):
     if filename.endswith(".py"):
+        if filename == "stars.py":
+            continue
         bot.load_extension(f"cogs.{filename[:-3]}")
     else:
         if os.path.isfile(filename):
@@ -63,4 +68,4 @@ async def startup():
 
 
 bot.loop.create_task(startup())
-bot.run(env["TOKEN"])
+bot.run("ODkwNjczNzkwNTg4MTcwMjQx.YUzOmw.Y9Pg8yXfnM3XEBfCl54AXUz8oOY")
