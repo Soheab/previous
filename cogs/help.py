@@ -2,8 +2,13 @@ from typing import Any, Callable, Coroutine, Dict, Literal, NamedTuple, Optional
 from re import L, search
 from nextcord.errors import Forbidden, HTTPException
 
-from nextcord.ext import commands
 from nextcord.utils import escape_markdown as escma
+from typing import Dict, NamedTuple, Optional
+
+from .utils.split_txtfile import split_txtfile
+
+from nextcord.ext import commands
+from nextcord.abc import GuildChannel
 from nextcord import (
     Button,
     ButtonStyle,
@@ -25,6 +30,7 @@ HELP_CHANNEL_ID: int = 890674348313157703  # 881965127031722004
 HELP_LOGS_CHANNEL_ID: int = 890674366776475769  # 883035085434142781
 HELPER_ROLE_ID: int = 916051595794448396  # 882192899519954944
 STAFF_ROLE_ID: int = 916051618187870280  # 881119384528105523
+
 CUSTOM_ID_PREFIX: str = "help:"
 
 from .utils.split_txtfile import split_txtfile
@@ -196,20 +202,6 @@ class HelpButton(ui.Button["HelpView"]):
         await msg.pin(reason="First message in help thread with the close button.")
 
     async def callback(self, interaction: Interaction):
-        if self.custom_id == f"{CUSTOM_ID_PREFIX}slashcmds":
-            GIST_URL = "https://gist.github.com/TAG-Epic/68e05d98a89982bac827ad2c3a60c50a"
-            ETA_WIKI = "https://en.wikipedia.org/wiki/Estimated_time_of_arrival"
-            ETA_HYPER = f"[ETA]({ETA_WIKI} 'abbreviation for estimated time of arrival: the time you expect to arrive')"
-            emb = Embed(
-                title="Slash Commands",
-                colour=Colour.blurple(),
-                description="Slash commands aren't in the main library yet. You can use discord-interactions w/ nextcord for now. "
-                f"To check on the progress (or contribute) see the pins of <#881191158531899392>. No {ETA_HYPER} for now.\n\n"
-                f"(PS: If you are using discord-interactions for slash, please add [this cog]({GIST_URL} 'gist.github.com') "
-                "(link). It restores the `on_socket_response` removed in d.py v2.)",
-            )
-            await interaction.response.send_message(embed=emb, ephemeral=True)
-            return
 
         confirm_view = ConfirmView()
 
@@ -232,10 +224,9 @@ class HelpButton(ui.Button["HelpView"]):
 
 class HelpView(ui.View):
     def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(HelpButton("Nextcord", style=ButtonStyle.red, custom_id="nextcord"))
-        self.add_item(HelpButton("Python", style=ButtonStyle.green, custom_id="python"))
-        self.add_item(HelpButton("Slash Commands", style=ButtonStyle.blurple, custom_id="slashcmds"))
+        super().__init__(timeout = None)
+        self.add_item(HelpButton("Nextcord", style = ButtonStyle.red, custom_id = "nextcord"))
+        self.add_item(HelpButton("Python", style = ButtonStyle.green, custom_id = "python"))
 
 
 class ConfirmButton(ui.Button["ConfirmView"]):
@@ -286,7 +277,7 @@ class ThreadCloseView(ui.View):
         if not isinstance(interaction.channel, Thread) or interaction.channel.parent_id != HELP_CHANNEL_ID:
             return False
 
-        return interaction.user.id == self._thread_author.id or interaction.user.get_role(HELPER_ROLE_ID)
+        return interaction.user.id == self._thread_author.id or interaction.user.get_role(HELP_MOD_ID)
 
 
 class HelpCog(commands.Cog):
@@ -359,6 +350,16 @@ class HelpCog(commands.Cog):
             return
         else:
             raise error
+
+    @commands.command()
+    @commands.has_role(HELP_MOD_ID)
+    async def topic(self, ctx, *, topic):
+        if not ctx.channel.type == ChannelType.private_thread:
+            return await ctx.send("This command can only be used in help threads!")
+        if ctx.message.channel.parent.id != HELP_CHANNEL_ID:
+            return await ctx.send("This command can only be used in help threads!")
+        author = await get_thread_author(ctx.channel)
+        await ctx.channel.edit(name=f"{topic} ({author})")
 
 
 def setup(bot):
